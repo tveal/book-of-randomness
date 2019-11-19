@@ -1,0 +1,280 @@
+buildscript {
+    repositories {
+        jcenter()
+    }
+    dependencies {
+        classpath 'org.yaml:snakeyaml:1.17'
+    }
+}
+import org.yaml.snakeyaml.Yaml
+
+task build {
+    dependsOn "buildBook"
+    // Make sure repo is setup to use hooks (enforce book updates to dynamic content)
+    doLast {
+        Utils.bash("cd $rootDir && git config core.hooksPath gradle/hooks")
+    }
+}
+
+task buildBook {
+    DocFunctions dFunc = new DocFunctions("$rootDir/book")
+    doLast {
+        Utils.buildAllDocs(dFunc, "$rootDir")
+    }
+}
+
+class DocFunctions {
+    String bookDir
+    String currentDocName
+    ConfigLoader configLoader
+    DocFunctions(String bookDir) {
+        this.bookDir = bookDir
+        configLoader = new ConfigLoader("$bookDir/config.yml")
+    }
+
+    String createToc() {
+        String chapterFiles = Utils.bashReturn("find $bookDir -type f -name 'ch*' |sort")
+        String relativePath = currentDocName.startsWith("ch") ? "." : "book"
+
+        String toc = ""
+        int ch = -1
+        chapterFiles.split(/\n/).each {
+            File file = new File(it)
+            String fileName = file.name
+            Map fileInfo = Utils.createFileInfo(fileName)
+
+            if (ch != fileInfo.ch) {
+                ch = fileInfo.ch
+
+                String chDesc = "Chapter $ch"
+                try {
+                    String chDescProp = configLoader.getChapterDesc(ch)
+                    chDesc += ": **$chDescProp**"
+                } catch (err) {
+                    println "Didn't find a chapter description for ch $ch; Not setting one."
+                }
+                toc += "\n$chDesc\n"
+            }
+
+            toc += "- [${fileInfo.title}]($relativePath/$fileName)\n"
+        }
+        return toc
+    }
+
+    /**
+        Only for bookDir/ch* files
+    */
+    String createChapterHeader() {
+        return "# ${Utils.createFileInfo(this.currentDocName).title}"
+    }
+
+    /**
+        Only for bookDir/ch* files
+    */
+    String createNav() {
+        String chapterFiles = Utils.bashReturn("find $bookDir -type f -name 'ch*' |sort")
+
+        List nav = []
+        String lastFileName
+        boolean foundFile = false
+        boolean done = false
+        chapterFiles.split(/\n/).each {
+            if (!done) {
+                File file = new File(it)
+                String fileName = file.name
+
+                if (fileName == this.currentDocName) {
+                    if (lastFileName?.trim()) {
+                        nav.push Utils.createPreviousButton(lastFileName)
+                    }
+                    nav.push Utils.createHomeButton()
+                    foundFile = true
+                } else if (foundFile) {
+                    nav.push Utils.createNextButton(fileName)
+                    done = true
+                }
+
+                lastFileName = fileName
+            }
+        }
+        return "${nav.reverse().join("\n")}\n"
+    }
+}
+
+class ConfigLoader {
+    String ymlFile
+    Map yaml
+
+    ConfigLoader(String ymlFile) {
+        this.ymlFile = ymlFile
+        yaml = new Yaml().load((ymlFile as File).text)
+    }
+
+    String getChapterDesc(int chapter) {
+        return getProp("book.chapters.ch${chapter}.desc")
+    }
+
+    def getProp(String propRef) {
+        def prop
+        try {
+            // https://mrhaki.blogspot.com/2009/11/groovy-goodness-simple-evaluation-of.html
+            prop = Eval.x(yaml, "x.$propRef")
+        } catch (err) {
+            throw new Exception("\nPROP NOT FOUND: $propRef from $ymlFile", err)
+        }
+        if (!prop) {
+            throw new Exception("\nMISSING PROP VALUE: $propRef from $ymlFile")
+        }
+        return prop
+    }
+}
+
+class Utils {
+
+    static String createPreviousButton(String fileName) {
+        String info = "Previous: ${createFileInfo(fileName).title}"
+        return "[![](img/Open_Iconic_arrow_circle_left.png \"$info\")](./$fileName \"$info\")"
+    }
+
+    static String createHomeButton() {
+        String info = "Home"
+        return "[![](img/Open_Iconic_home.png \"$info\")](../README.md \"$info\")"
+    }
+
+    static String createNextButton(String fileName) {
+        String info = "Next: ${createFileInfo(fileName).title}"
+        return "[![](img/Open_Iconic_arrow_circle_right.png \"$info\")](./$fileName \"$info\")"
+    }
+
+    static void buildAllDocs(DocFunctions dFunc, String rootDir) {
+        String docFiles = bashReturn("find ${dFunc.bookDir} -type f -name 'ch*' |sort")
+        docFiles += "$rootDir/README.md\n"
+        docFiles.split(/\n/).each {
+            File file = new File(it)
+            file.text = evalDoc(dFunc, file.text, file.name)
+
+            if (file.name.startsWith("ch")) {
+                [
+                    "{createChapterHeader}",
+                    "{createNav}"
+                ].each {
+                    if (!file.text.contains(it)) {
+                        throw new Exception("The file ${file.name} does not contain dynamic content for $it")
+                    }
+                }
+            }
+        }
+    }
+
+    static String evalDoc(DocFunctions dFunc, String doc, String docName) {
+        String start = '[//]: # (start'
+        String end = '[//]: # (end'
+        boolean isGenLine = false
+
+        String newDoc = ""
+        doc.split('\n').each { line ->
+            String newLine = "$line\n"
+            if (line.startsWith(start)) {
+                isGenLine = true
+                dFunc.currentDocName = docName
+                String cmd = line.split("[\\{\\}]")[1]
+                newLine += "${Eval.x(dFunc, "x.${cmd}()")}\n";
+            } else if (line.startsWith(end)) {
+                isGenLine = false
+            } else if (isGenLine) {
+                newLine = ""
+            }
+            newDoc += newLine
+        }
+        return newDoc
+    }
+
+    static Map createFileInfo(String fileName) {
+        String[] parts = fileName.split('-')
+        String title = toCamelCase(fileName
+            .replace("${parts[0]}-${parts[1]}-", "")
+            .replace(".md", ""), [capitalized: true, delimiter: " "])
+        
+        int ch = parts[0].replaceAll("ch", "").toInteger();
+        int section = parts[1].toInteger();
+        String id = "${ch}.${section}"
+
+        return [
+            id: id,
+            ch: ch,
+            title: "$id $title"
+        ]
+    }
+
+    static String toCamelCase( String text,
+        options=[
+            capitalized: false,
+            delimiter: ""
+        ]) {
+        boolean capitalized = options.capitalized ?: false
+        String delimiter = options.delimiter ?: ""
+        text = text.replaceAll("(_|-)([A-Za-z0-9])", { Object[] it -> delimiter + it[2].toUpperCase() });
+        return capitalized ? text.capitalize() : text;
+    }
+
+    static String bashReturn(String cmd, String authExports="") {
+        return bash(cmd, [ stream: false, exports: authExports ])
+    }
+
+    static String flattenString(String str) {
+        return str.replaceAll(/\s\s/, " ").replaceAll(/\s\s/, "")
+    }
+
+    /**
+        Run a bash command
+
+        Examples:
+        - bash("echo 'Aloha Honua!'")
+        - println bash("docker images", [ stream: false ])
+        - bash("docker images", [ dry: true ])
+        - println bash('echo ">>--->> FAKE_ENV_VAR=$FAKE_ENV_VAR"', [ stream: false, exports: "export FAKE_ENV_VAR=foo" ]);
+
+        Boolean Options:
+        - stream: print the live output of command as it happens, else return stdout at the end;
+            defaults to true
+        - dry: don't run the command, just print it; defaults to false
+        - exports: string; include bash env export commands to keep hidden from output
+    */
+    static String bash(String cmd, options=[ stream: true, dry: false, exports: "" ]) {
+        cmd = flattenString(cmd)
+        boolean stream = options.stream
+        boolean dry = options.dry
+        String exports = options.exports
+        String returnValue = ""
+        if (dry) {
+            println cmd
+        } else {
+            String runnableCmd = cmd;
+            if (exports?.trim()) {
+                runnableCmd = "$exports; $cmd";
+            }
+            def proc = [ '/bin/bash', '-c', runnableCmd ].execute()
+
+            def returnCode
+            String errMsg = "Failed to run bash command\n\n"
+            if (stream) {
+                proc.waitForProcessOutput(System.out, System.err)
+                returnCode = proc.exitValue()
+                errMsg += "\t\$ $cmd\n"
+                errMsg += "\tSee above for errors\n"
+            } else {
+                proc.waitFor()
+                returnCode = proc.exitValue()
+                def stdout = proc.in.text
+                def stderr = proc.err.text
+                errMsg += "\t\$ $cmd\n"
+                errMsg += "\t$stderr\n"
+                returnValue = stdout
+            }
+            if (returnCode != 0) {
+                throw new Exception(errMsg)
+            }
+        }
+        return returnValue
+    }
+}

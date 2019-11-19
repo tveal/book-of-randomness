@@ -1,0 +1,14 @@
+#!/bin/bash
+
+set -e
+
+build="$(./gradlew buildBook)"
+echo "Built the book to update the dynamic content."
+
+unstagedMdCount=$(git status --porcelain | grep '^.M\|^??' | grep '.*\.md$' | wc -l)
+if [ "$unstagedMdCount" -gt "0" ]; then
+    echo
+    echo "FAILED to commit; you have $unstagedMdCount unstaged doc files (*.md)"
+    echo
+    exit 1
+fi
