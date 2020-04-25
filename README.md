@@ -1,3 +1,5 @@
+[![Gitpod Ready-to-Code](https://img.shields.io/badge/Gitpod-Ready--to--Code-blue?logo=gitpod)](https://gitpod.io/#https://github.com/tveal/book-of-randomness) 
+
 # Book of Randomness
 
 A place to store my random learnings and git-book thing.
